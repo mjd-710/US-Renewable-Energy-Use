@@ -1,0 +1,252 @@
+###CODE FOR PHY408 FINAL PROJECT
+
+
+## PLOT OF CONSUMPTION BY SOURCE
+import pandas as pd
+import matplotlib.pyplot as plt
+
+df_energy = pd.read_csv("/Users/majedelkhalifa/Downloads/MER_T10_01 (1).csv")  
+subset = df_energy[df_energy['Column_Order'].isin([5, 6, 7, 8, 9, 10, 11])].copy() #choosing desired sets (source consumption values)
+
+       #ensuring YYYYMM is in dt
+subset['YYYYMM'] = subset['YYYYMM'].astype(str).str.zfill(6)
+subset = subset[subset['YYYYMM'].str[4:6].astype(int).between(1, 12)]
+subset['Date'] = pd.to_datetime(subset['YYYYMM'], format='%Y%m')
+       #ensuring all values are numeric
+subset['Value'] = pd.to_numeric(subset['Value'], errors='coerce')
+
+pivot_subset = subset.pivot_table(index='Date', columns='Description', values='Value', aggfunc='sum') #pivot to plot
+
+plt.figure(figsize=(14, 6))
+for col in pivot_subset.columns:
+    plt.plot(pivot_subset.index, pivot_subset[col], label=col)
+
+plt.title("Monthly Renewable Energy Consumption by Source")
+plt.ylabel("Trillion Btu")
+plt.xlabel("Date")
+plt.legend(title="Energy Source", bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+## ANNUAL PLOT
+subset['Year'] = subset['Date'].dt.year
+            #grouping by year and source
+annual_consumption = subset.groupby(['Year', 'Description'])['Value'].sum().unstack()
+
+plt.figure(figsize=(14, 6))
+for col in annual_consumption.columns:
+    plt.plot(annual_consumption.index, annual_consumption[col], label=col)
+
+plt.title("Annual Renewable Energy Consumption by Source")
+plt.ylabel("Quadrillion Btu")
+plt.xlabel("Year")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+
+## SEASONAL DECOMPOSE
+from statsmodels.tsa.seasonal import seasonal_decompose 
+for col in pivot_subset.columns:
+    ts = pivot_subset[col].dropna()  #dropping missing vals
+
+    if len(ts) < 24:
+        print(f"Skipping {col} (not enough data)")
+        continue
+
+    result = seasonal_decompose(ts, model='additive', period=12)
+
+    plt.figure(figsize=(12, 8))
+    plt.suptitle(f"Seasonal Decomposition: {col}", fontsize=16)
+
+    plt.subplot(411)
+    plt.plot(result.trend)
+    plt.title('Trend')
+
+    plt.subplot(412)
+    plt.plot(result.seasonal)
+    plt.title('Seasonal')
+
+    plt.subplot(413)
+    plt.plot(result.resid)
+    plt.title('Residual')
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.show()
+        
+
+
+## PREDICTIONS FOR 2025-2030
+import pandas as pd
+import matplotlib.pyplot as plt
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+forecast_months = 60
+train_start = "2019-01-01"
+train_end = "2024-12-31"
+
+for col in pivot_subset.columns:
+    ts = pivot_subset[col].loc[train_start:train_end].dropna()
+
+    if len(ts) < 36:
+        print(f"Skipping {col} (not enough data)")
+        continue
+
+    try:
+         #fittin sarima
+        model = SARIMAX(ts, order=(1, 1, 1), seasonal_order=(1, 1, 1, 12),
+                        enforce_stationarity=False, enforce_invertibility=False)
+        results = model.fit(disp=False)
+
+        #forecasting next 5 years (60 months)
+        forecast = results.get_forecast(steps=forecast_months)
+        forecast_mean = forecast.predicted_mean
+        forecast_ci = forecast.conf_int()
+
+        plt.figure(figsize=(12, 6))
+        ts.plot(label="Observed (2019–2024)", color='blue')
+        forecast_mean.plot(label="Forecast (2025–2030)", color='red')
+        plt.fill_between(forecast_mean.index, forecast_ci.iloc[:, 0], forecast_ci.iloc[:, 1],
+                         color='orange', alpha=0.3)
+        plt.title(f"SARIMA Forecast for {col}")
+        plt.xlabel("Date")
+        plt.ylabel("Value")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+    except Exception as e:
+        print(f"SARIMA failed for {col}: {e}")
+        
+        
+##SPECTRAL ANALYSIS
+import numpy as np
+from scipy.fft import fft, fftfreq
+
+subset = df_energy[df_energy['Column_Order'].isin([5,6,7,8,9,11])].copy()
+subset['YYYYMM'] = subset['YYYYMM'].astype(str).str.zfill(6)
+subset = subset[subset['YYYYMM'].str[4:6].astype(int).between(1, 12)]
+subset['Date'] = pd.to_datetime(subset['YYYYMM'], format='%Y%m')
+subset['Value'] = pd.to_numeric(subset['Value'], errors='coerce')
+
+pivot_subset = subset.pivot_table(index='Date', columns='Description', values='Value', aggfunc='sum')
+pivot_subset = pivot_subset.interpolate(method='time')
+
+ #fft plots
+plt.figure(figsize=(12, 6))
+colors = plt.cm.tab10(np.linspace(0, 1, len(pivot_subset.columns)))
+
+for i, col in enumerate(pivot_subset.columns):
+    y = pivot_subset[col].values
+    y = y - np.mean(y)
+    N = len(y)
+    #applying hanning window
+    window = np.hanning(N)
+    y_windowed = y * window
+    
+    #computing FFT
+    yf = fft(y_windowed)
+    xf = fftfreq(N, 1)[:N//2]
+    periods = 1/(xf + 1e-10)  #avoiding division by zero
+    
+    plt.semilogy(periods, 2/N * np.abs(yf[0:N//2]), 
+                color=colors[i],
+                label=col,
+                linewidth=2)
+
+  #formatting
+plt.title('Spectral Analysis of Renewable Energy Sources', fontsize=14)
+plt.xlabel('Period (months)', fontsize=12)
+plt.ylabel('Power Spectrum Magnitude (log scale)', fontsize=12)
+plt.xlim(0, 60)  #focusing on 5 year periods
+plt.xticks([12, 24, 36, 60], ['1y', '2y', '3y', '5y'])  #labelling year marks
+plt.grid(True, which='both', alpha=0.3)
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+for period in [12, 24, 36, 60]:
+    plt.axvline(period, color='gray', linestyle=':', alpha=0.5)
+
+plt.tight_layout()
+plt.show()
+        
+        
+        
+##CROSS SPECTL ANALYSIS (only in appendix)
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import csd, coherence
+import pandas as pd
+
+subset = df_energy[df_energy['Column_Order'].isin([5,6,7,8,9,11])].copy()
+subset['YYYYMM'] = subset['YYYYMM'].astype(str).str.zfill(6)
+subset = subset[subset['YYYYMM'].str[4:6].astype(int).between(1, 12)]
+subset['Date'] = pd.to_datetime(subset['YYYYMM'], format='%Y%m')
+subset['Value'] = pd.to_numeric(subset['Value'], errors='coerce')
+pivot_subset = subset.pivot_table(index='Date', columns='Description', values='Value', aggfunc='sum').interpolate(method='time')
+
+print("Available columns in data:")
+print(pivot_subset.columns.tolist())
+
+def get_matching_column(possible_names):
+    """Find first column that matches any of the possible names (case-insensitive)"""
+    for name in possible_names:
+        for col in pivot_subset.columns:
+            if name.lower() in col.lower():
+                return col
+    raise KeyError(f"No column matching any of {possible_names} found")
+
+# definin analysis pairs w/ flexible naming
+pairs = [
+    (get_matching_column(['solar', 'pv']), 
+     get_matching_column(['wind', 'windpower'])),
+    (get_matching_column(['hydro', 'hydroelectric']), 
+     get_matching_column(['biofuel', 'biofuels'])),
+    (get_matching_column(['wind', 'windpower']), 
+     get_matching_column(['biofuel', 'biofuels']))
+]
+
+
+plt.figure(figsize=(14, 8))
+colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
+
+for i, (src1, src2) in enumerate(pairs):
+    try:
+        # computin cross spectl density n coherence
+        f, Pxy = csd(pivot_subset[src1], pivot_subset[src2], nperseg=120, fs=12)
+        f_coh, Cxy = coherence(pivot_subset[src1], pivot_subset[src2], nperseg=120, fs=12)
+        
+      
+        with np.errstate(divide='ignore'):
+            periods = 1/f
+     
+        ax1 = plt.subplot(2, len(pairs), i+1)
+        plt.semilogy(periods, np.abs(Pxy), color=colors[i])
+        plt.title(f'{src1}-{src2}\nCross-Power', fontsize=10)
+        plt.ylabel('Power Density')
+        plt.xlim(0, 10)  
+        plt.grid(True, alpha=0.3)
+        
+        # Plot Coherence
+        ax2 = plt.subplot(2, len(pairs), i+1+len(pairs))
+        plt.plot(periods, Cxy, color=colors[i])
+        plt.title(f'{src1}-{src2}\nCoherence', fontsize=10)
+        plt.xlabel('Period (years)')
+        plt.ylabel('Coherence (0-1)')
+        plt.xlim(0, 10)
+        plt.ylim(0, 1)
+        plt.grid(True, alpha=0.3)
+        
+        # mark key periods
+        for ax in [ax1, ax2]:
+            for period in [1, 2, 3, 5]:
+                ax.axvline(period, color='gray', linestyle=':', alpha=0.5)
+                
+    except Exception as e:
+        print(f"Failed to process {src1} vs {src2}: {str(e)}")
+        continue
+
+plt.tight_layout()
+plt.suptitle('Cross-Spectral Analysis of Renewable Energy Sources', y=1.02)
+plt.show()
